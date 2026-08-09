@@ -1,0 +1,310 @@
+name: Codex PR Checklist
+
+on:
+  pull_request:
+    branches:
+      - master
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+
+jobs:
+  analyze:
+    name: Run PR checklist
+    if: >-
+      always() &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.draft == false
+    # Serialize users of the rotating auth file. Superseded analysis stops,
+    # but its job stays alive long enough to persist credentials.
+    concurrency:
+      group: codex-pro-auth-${{ github.repository }}
+      cancel-in-progress: true
+    environment: codex-auth
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      report-current: ${{ steps.check-head.outputs.current }}
+    env:
+      DENO_NO_UPDATE_CHECK: "1"
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: target
+          persist-credentials: false
+
+      - name: Prepare PR branches
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          cd "$GITHUB_WORKSPACE/target"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git branch "$BASE_REF" "$BASE_SHA"
+          git switch --create "$HEAD_REF" "$HEAD_SHA"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+
+      - name: Install Codex CLI
+        shell: bash
+        run: |
+          npm install --global @openai/codex@0.147.0
+          codex --version
+
+      - name: Set up Codex Linux sandbox
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            apparmor-profiles \
+            apparmor-utils \
+            bubblewrap
+          sudo install -m 644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r \
+            /etc/apparmor.d/bwrap-userns-restrict
+
+          command -v bwrap
+          bwrap --version
+          bwrap \
+            --unshare-user \
+            --unshare-net \
+            --ro-bind / / \
+            /bin/true
+
+      - name: Install and verify PR checklist skill
+        shell: bash
+        env:
+          DENO_DIR: /tmp/pr-checklist-deno-cache
+          npm_config_cache: /tmp/pr-checklist-npm-cache
+        run: |
+          SKILL_DEST="$HOME/.agents/skills/pr-checklist"
+          SELF_CHECK_REPORT="$RUNNER_TEMP/pr-checklist-self-check.md"
+
+          npx --yes skills@1.5.22 add \
+            't0ster/pr-checklist@v0.1.1' \
+            --skill pr-checklist \
+            --agent codex \
+            --global \
+            --yes \
+            --copy
+
+          jq --exit-status '
+            .skills["pr-checklist"].source == "t0ster/pr-checklist"
+          ' "$HOME/.agents/.skill-lock.json" >/dev/null
+          test -f "$SKILL_DEST/SKILL.md"
+
+          cd "$SKILL_DEST"
+          printf '{}' |
+            npx --yes deno@2.5.4 run --allow-read=. scripts/self-check.ts \
+              > "$SELF_CHECK_REPORT"
+          grep -Fx '# 📋 PR Checklist self-check' "$SELF_CHECK_REPORT"
+
+      - name: Restore Codex authentication
+        id: restore-auth
+        shell: bash
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          if [[ -z "${CODEX_AUTH_JSON:-}" ]]; then
+            echo "::error::The codex-auth environment is missing CODEX_AUTH_JSON."
+            exit 1
+          fi
+
+          install -d -m 700 "$CODEX_HOME"
+          umask 077
+          printf '%s' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
+
+          jq -e '
+            .auth_mode == "chatgpt" and
+            (((.tokens.refresh_token // "") | length) > 0)
+          ' "$CODEX_HOME/auth.json" >/dev/null
+
+      - name: Run PR checklist
+        if: ${{ success() && !cancelled() }}
+        shell: bash
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+          CODEX_OUTPUT_PATH: ${{ runner.temp }}/codex-output.log
+          DENO_DIR: /tmp/pr-checklist-deno-cache
+          GH_TOKEN: ${{ github.token }}
+          TMPDIR: /tmp
+          npm_config_cache: /tmp/pr-checklist-npm-cache
+          npm_config_offline: "true"
+          REPORT_PATH: ${{ runner.temp }}/codex-report.md
+        run: |
+          cd "$GITHUB_WORKSPACE/target"
+          REVIEW_HEAD="$(git rev-parse HEAD)"
+
+          codex exec \
+            --ignore-user-config \
+            --ignore-rules \
+            --strict-config \
+            --disable apps \
+            --disable hooks \
+            --disable remote_plugin \
+            --enable network_proxy \
+            --config 'approval_policy="never"' \
+            --config 'default_permissions="pr_checklist"' \
+            --config 'permissions.pr_checklist.extends=":workspace"' \
+            --config 'permissions.pr_checklist.network.enabled=true' \
+            --config 'permissions.pr_checklist.network.domains={"api.github.com"="allow","zenquotes.io"="allow"}' \
+            --config "permissions.pr_checklist.filesystem={\"$CODEX_HOME\"=\"deny\"}" \
+            --config 'shell_environment_policy.inherit="all"' \
+            --config 'shell_environment_policy.ignore_default_excludes=true' \
+            --config 'shell_environment_policy.include_only=["PATH","HOME","USER","SHELL","LANG","LC_*","CI","TMPDIR","GH_TOKEN","GITHUB_REPOSITORY","DENO_DIR","DENO_NO_UPDATE_CHECK","npm_config_*"]' \
+            --config 'web_search="disabled"' \
+            --config 'model_reasoning_effort="max"' \
+            --color never \
+            "\$pr-checklist current pr" \
+            2>&1 |
+            tee "$CODEX_OUTPUT_PATH"
+
+          GENERATED_REPORT_PATH="$(
+            sed -n \
+              's#^<pr_checklist>\(/tmp/pr-checklist\.[^<]*/pr-checklist\.md\)</pr_checklist>$#\1#p' \
+              "$CODEX_OUTPUT_PATH" |
+              tail -n 1
+          )"
+          test -s "$GENERATED_REPORT_PATH"
+          head -n 1 "$GENERATED_REPORT_PATH" |
+            grep -Fx '# 📋 PR Checklist'
+          test "$(git rev-parse HEAD)" = "$REVIEW_HEAD"
+          git diff --quiet
+          git diff --cached --quiet
+          install -m 600 "$GENERATED_REPORT_PATH" "$REPORT_PATH"
+
+      - name: Check PR head
+        id: check-head
+        if: ${{ success() && !cancelled() }}
+        shell: bash
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          CURRENT_HEAD="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '.head.sha'
+          )"
+
+          if [[ "$CURRENT_HEAD" == "$EXPECTED_HEAD" ]]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping superseded report for $EXPECTED_HEAD."
+          fi
+
+      - name: Upload comment
+        if: ${{ steps.check-head.outputs.current == 'true' }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-pr-comment
+          path: ${{ runner.temp }}/codex-report.md
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Persist Codex authentication
+        if: >-
+          always() &&
+          steps.restore-auth.outcome == 'success'
+        shell: bash
+        env:
+          CODEX_HOME: ${{ runner.temp }}/codex-home
+          GH_TOKEN: ${{ secrets.CODEX_AUTH_WRITER_PAT }}
+        run: |
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::The codex-auth environment is missing CODEX_AUTH_WRITER_PAT."
+            exit 1
+          fi
+
+          jq -e '
+            .auth_mode == "chatgpt" and
+            (((.tokens.refresh_token // "") | length) > 0)
+          ' "$CODEX_HOME/auth.json" >/dev/null
+
+          for delay in 0 2 5; do
+            sleep "$delay"
+            if gh secret set CODEX_AUTH_JSON \
+              --repo "$GITHUB_REPOSITORY" \
+              --env codex-auth \
+              < "$CODEX_HOME/auth.json"; then
+              exit 0
+            fi
+          done
+
+          echo "::error::Failed to persist refreshed Codex authentication."
+          exit 1
+
+  comment:
+    name: Post PR comment
+    needs:
+      - analyze
+    if: >-
+      needs.analyze.result == 'success' &&
+      needs.analyze.outputs.report-current == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    env:
+      EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+
+    steps:
+      - name: Download comment
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: codex-pr-comment
+          path: ${{ runner.temp }}/codex-pr-comment
+
+      - name: Create PR comment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_PATH: ${{ runner.temp }}/codex-pr-comment/codex-report.md
+        run: |
+          COMMENT_PATH="$RUNNER_TEMP/codex-comment.md"
+          PAYLOAD_PATH="$RUNNER_TEMP/codex-comment.json"
+          CURRENT_HEAD="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '.head.sha'
+          )"
+
+          if [[ "$CURRENT_HEAD" != "$EXPECTED_HEAD" ]]; then
+            echo "::notice::Skipping superseded report for $EXPECTED_HEAD."
+            exit 0
+          fi
+
+          {
+            printf '<!-- codex-pr-checklist -->\n\n'
+            cat "$REPORT_PATH"
+          } > "$COMMENT_PATH"
+          jq --raw-input --slurp '{body: .}' "$COMMENT_PATH" > "$PAYLOAD_PATH"
+
+          gh api --method POST \
+            "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+            --input "$PAYLOAD_PATH" \
+            >/dev/null
