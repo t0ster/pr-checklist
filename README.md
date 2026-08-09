@@ -1,3 +1,5 @@
+<img width="844" height="554" src="https://github.com/user-attachments/assets/59351b7a-f2f4-42b5-8f92-e199d7d16682" />
+
 ## How to set it up on GitHub CI
 
 ### 1. Copy the workflow
