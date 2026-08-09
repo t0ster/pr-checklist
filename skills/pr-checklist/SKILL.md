@@ -15,6 +15,7 @@ Default: current branch's GitHub PR. Explicit targets take precedence:
 - `branch <branch> [base <base>]`
 - `range <base>..<head>` or `range <base>...<head>`
 - `commit <sha>`, `staged`, or `working-tree`
+- `self-check` (no review target)
 
 Paths or natural-language focus/exclusions restrict the target.
 
@@ -22,9 +23,13 @@ PR uses GitHub's diff; branch uses `base...branch` (infer default base or ask); 
 
 Use GitHub only for PR identity, base/head, paths, and diff — not body, comments, reviews, checks, coverage, issues, or other metadata.
 
+## Self-check
+
+For `self-check`, read and follow [references/self-check.md](references/self-check.md), then stop. Do not enter the normal review workflow.
+
 ## Configuration
 
-Before loading the diff, read and follow [references/configuration.md](references/configuration.md). Resolve `.pr-checklist.yml` from the target state and validate it with `scripts/parse-config.ts`. A missing file uses the defaults; an invalid file fails.
+For normal reviews, before loading the diff, read and follow [references/configuration.md](references/configuration.md). Resolve `.pr-checklist.yml` from the target state and validate it with `scripts/parse-config.ts`. A missing file uses the defaults; an invalid file fails.
 
 If configuration enables no analysis, print `PR checklist: nothing enabled to analyze.` and stop successfully.
 
