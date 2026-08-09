@@ -54,8 +54,9 @@ if ! printf '%s' "$PR_CHECKLIST_JSON" | npx --yes deno@2.5.4 run \
     scripts/render.ts \
     > "$REPORT"
 then
-  rm -f "$REPORT"
-  rmdir "$REPORT_DIR" 2>/dev/null || true
+  # Disabled: strict Codex permissions reject destructive cleanup.
+  # rm -f "$REPORT"
+  # rmdir "$REPORT_DIR" 2>/dev/null || true
   exit 1
 fi
 
