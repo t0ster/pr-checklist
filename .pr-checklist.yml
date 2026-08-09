@@ -1,0 +1,11 @@
+sections:
+  checks:
+    items:
+      - id: skill-contract-consistency
+        title: Skill contract consistency
+        applies_when: Files under skills/pr-checklist are changed.
+        instructions: |
+          Verify SKILL.md, reference docs, schemas, parsers, renderer, and
+          self-check remain consistent. Any changed configuration or report
+          field must be validated, delegated, rendered, and self-checked where
+          applicable.
