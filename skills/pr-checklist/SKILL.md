@@ -54,7 +54,7 @@ then
   exit 1
 fi
 
-printf 'PR checklist: %s\n' "$REPORT"
+printf '<pr_checklist>%s</pr_checklist>\n' "$REPORT"
 ```
 
 JSON enters stdin; Markdown exits stdout. Report the path; change destination only when requested.
